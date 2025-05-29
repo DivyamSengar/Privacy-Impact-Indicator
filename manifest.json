@@ -1,0 +1,25 @@
+{
+    "manifest_version": 3,
+    "name": "Privacy Impact Indicator",
+    "version": "0.3.1",
+    "description": "Shows a real-time privacy-impact score for each page visit.",
+    "action": {
+      "default_popup": "popup.html",
+      "default_title": "Privacy Impact",
+      "default_icon": {                      
+        "16": "icon16.png"
+      }
+    },
+  
+    "permissions": ["webRequest", "webNavigation", "storage", "tabs"],
+    "host_permissions": ["<all_urls>"],
+    "background": { "service_worker": "background.js" },
+  
+    "content_scripts": [
+      {
+        "matches": ["<all_urls>"],
+        "js": ["contentScript.js"]
+      }
+    ]
+  }
+  

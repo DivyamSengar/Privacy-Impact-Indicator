@@ -1,11 +1,12 @@
-/* ——— bootstrap tracker list ——— */
+/* -----------------------------------------------------------------------
+   Privacy-Impact extension – service-worker
+   v0.4
+------------------------------------------------------------------------ */
+
 let trackerSet = new Set();
 fetch(chrome.runtime.getURL('trackerList.json'))
   .then(r => r.json())
-  .then(l => (trackerSet = new Set(l)));
-
-/* ——— tiny helpers ——— */
-const scores = {};                                   // tabId → record
+  .then(list => (trackerSet = new Set(list)));
 
 function getBase(url) {
   try { return new URL(url).hostname.split('.').slice(-2).join('.'); }
@@ -13,8 +14,7 @@ function getBase(url) {
 }
 
 function compute(rec) {
-  const tp = rec.thirdPartyHosts.size;
-  const tr = rec.trackers;
+  const tp = rec.thirdPartyHosts.size, tr = rec.trackers;
   if (tr > 3 || tp > 10) return 0;
   if (tr)                return Math.max(30 - (tr - 1) * 5, 10);
   if (!tp)               return 100;
@@ -23,56 +23,56 @@ function compute(rec) {
   return 40;
 }
 
-/* ——— observe every completed request ——— */
+function topHosts(rec, n = 12) {
+  return Object.entries(rec.hostCounts)
+               .sort((a,b)=>b[1]-a[1]).slice(0,n)
+               .map(([host,hits])=>({host,hits,tracker:trackerSet.has(host)}));
+}
+
+const scores = {};
+
 chrome.webRequest.onCompleted.addListener(
   d => {
-    if (d.tabId < 0) return;                         // ignore bg / ext
-
+    if (d.tabId < 0) return;
     const rec = scores[d.tabId] ??= {
-      requests: 0, trackers: 0, thirdPartyHosts: new Set()
+      requests:0, trackers:0, thirdPartyHosts:new Set(), hostCounts:{}
     };
 
     rec.requests += 1;
-
-    const dest  = getBase(d.url);
-    const page  = d.initiator ? getBase(d.initiator) : '';
+    const dest = getBase(d.url);
+    const page = d.initiator ? getBase(d.initiator) : '';
 
     if (page && dest !== page) rec.thirdPartyHosts.add(dest);
     if (trackerSet.has(dest))  rec.trackers += 1;
+    rec.hostCounts[dest] = (rec.hostCounts[dest] || 0) + 1;
 
     const score = compute(rec);
 
-    /* push update to the tab (fail quietly if no listener yet) */
     chrome.tabs.sendMessage(
       d.tabId,
-      { type: 'PRIVACY_SCORE', score, ...rec },
-      () => { /* silence "receiving end does not exist" */ }
-    );
-
-    /* toolbar badge */
-    chrome.action.setBadgeText({ tabId: d.tabId, text: String(score) });
+      { type:'PRIVACY_SCORE', score,
+        requests:rec.requests, trackers:rec.trackers,
+        thirdParty:rec.thirdPartyHosts.size, hosts:topHosts(rec) },
+      () => {});
+    chrome.action.setBadgeText({tabId:d.tabId, text:String(score)});
     chrome.action.setBadgeBackgroundColor({
-      tabId: d.tabId,
-      color: score >= 70 ? 'green' : score >= 40 ? 'orange' : 'red'
+      tabId:d.tabId,
+      color: score>=70?'green':score>=40?'orange':'red'
     });
   },
-  { urls: ['<all_urls>'] }
+  {urls:['<all_urls>']}
 );
 
-/* ——— clean-up when tabs close / navigate ——— */
 chrome.tabs.onRemoved.addListener(id => delete scores[id]);
-chrome.webNavigation.onCommitted.addListener(({ tabId }) => delete scores[tabId]);
+chrome.webNavigation.onCommitted.addListener(({tabId}) => delete scores[tabId]);
 
-/* ——— message router ——— */
-chrome.runtime.onMessage.addListener((msg, sender, sendResp) => {
-  if (msg.type === 'GET_SCORE') {
-    const rec   = scores[msg.tabId] ?? { trackers: 0, thirdPartyHosts: new Set() };
-    sendResp({ score: compute(rec), trackers: rec.trackers,
-               thirdPartyHosts: [...rec.thirdPartyHosts] });
-    return true;                        // async reply
+chrome.runtime.onMessage.addListener((msg,_,send)=>{
+  if (msg.type==='GET_SCORE'){
+    const rec = scores[msg.tabId] ?? {requests:0, trackers:0,
+                                      thirdPartyHosts:new Set(), hostCounts:{}};
+    send({ score:compute(rec), requests:rec.requests, trackers:rec.trackers,
+           thirdParty:rec.thirdPartyHosts.size, hosts:topHosts(rec) });
+    return true;
   }
-
-  if (msg.type === 'OPEN_POPUP') {      // clicked the in-page badge
-    chrome.action.openPopup();          // show the toolbar popup
-  }
+  if (msg.type==='OPEN_POPUP') chrome.action.openPopup();
 });

@@ -1,108 +1,130 @@
 /* -----------------------------------------------------------------------
-   Privacy-Impact extension – service-worker
-   v0.5  – smooth exponential scoring
+   Privacy-Impact extension – service-worker (Manifest V3)
+   v0.6.1  – 5 s throttling · EMA smoothing · min-score tracking ·
+             consistent popup/badge numbers
 ------------------------------------------------------------------------ */
 
-const WEIGHTS = { tracker: 0.45, host: 0.15 }; // tweak to taste
+const WEIGHTS   = { tracker: 0.45, host: 0.15 };   // harm per tracker / host
+const EMA_ALPHA = 0.30;                            // 0 → frozen, 1 → no smoothing
+const THROTTLE_MS = 5000;                          // badge / UI update cadence
 
-/* -------- bootstrap tracker list ------------------------------------- */
+/* ---------- tracker list --------------------------------------------- */
 let trackerSet = new Set();
 fetch(chrome.runtime.getURL('trackerList.json'))
   .then(r => r.json())
   .then(list => (trackerSet = new Set(list)));
 
-/* -------- helpers ----------------------------------------------------- */
-function baseDomain(url) {
+/* ---------- helper fns ----------------------------------------------- */
+const baseDomain = url => {
   try { return new URL(url).hostname.split('.').slice(-2).join('.'); }
   catch { return ''; }
-}
+};
 
-/* Smooth score: 100 when risk = 0, falls off continuously toward 0. */
-function computeScore(rec) {
-  const wSum  = WEIGHTS.tracker * rec.trackers
-              + WEIGHTS.host    * rec.thirdPartyHosts.size;
-  const risk  = 1 - Math.exp(-wSum);      // ∈ [0,1)
-  return Math.round(100 * (1 - risk));    // 100 .. 0
-}
+const instantaneousScore = rec => {
+  const w = WEIGHTS.tracker * rec.trackers +
+            WEIGHTS.host    * rec.thirdPartyHosts.size;
+  const risk = 1 - Math.exp(-w);              // 0 (no risk) → 1 (max risk)
+  return Math.round(100 * (1 - risk));        // 100 … 0
+};
 
-function topHosts(rec, n = 12) {
-  return Object.entries(rec.hostCounts)
-               .sort((a, b) => b[1] - a[1])
-               .slice(0, n)
-               .map(([host, hits]) => ({
-                 host,
-                 hits,
-                 tracker: trackerSet.has(host)
-               }));
-}
+const topHosts = (rec, n = 12) =>
+  Object.entries(rec.hostCounts)
+        .sort((a, b) => b[1] - a[1])
+        .slice(0, n)
+        .map(([h, c]) => ({ host: h, hits: c, tracker: trackerSet.has(h) }));
 
-/* -------- per-tab bookkeeping ---------------------------------------- */
-const scores = {};                 // tabId → record
+/* ---------- per-tab state -------------------------------------------- */
+const tabs = {};   // tabId → state object
 
 chrome.webRequest.onCompleted.addListener(
-  d => {
-    if (d.tabId < 0) return;       // ignore non-tab traffic
+  details => {
+    const { tabId, url, initiator } = details;
+    if (tabId < 0) return;                    // ignore background / ext traffic
 
-    const rec = scores[d.tabId] ??= {
+    /* --- fetch or init state ----------------------------------------- */
+    const st = tabs[tabId] ??= {
       requests: 0,
       trackers: 0,
       thirdPartyHosts: new Set(),
-      hostCounts: {}
+      hostCounts: {},
+      emaScore: 100,
+      minScore: 100,
+      lastPush: 0,
+      lastBadgeScore: 100          // value we last showed to user
     };
 
-    rec.requests += 1;
+    /* --- record this request ----------------------------------------- */
+    st.requests += 1;
 
-    const dest = baseDomain(d.url);
-    const page = d.initiator ? baseDomain(d.initiator) : '';
+    const dest = baseDomain(url);
+    const page = initiator ? baseDomain(initiator) : '';
 
-    if (page && dest !== page) rec.thirdPartyHosts.add(dest);
-    if (trackerSet.has(dest))  rec.trackers += 1;
-    rec.hostCounts[dest] = (rec.hostCounts[dest] || 0) + 1;
+    if (page && dest && dest !== page) st.thirdPartyHosts.add(dest);
+    if (trackerSet.has(dest))         st.trackers += 1;
+    st.hostCounts[dest] = (st.hostCounts[dest] || 0) + 1;
 
-    const payload = {
-      type:       'PRIVACY_SCORE',
-      score:      computeScore(rec),
-      requests:   rec.requests,
-      trackers:   rec.trackers,
-      thirdParty: rec.thirdPartyHosts.size,
-      hosts:      topHosts(rec),
-      thirdPartyHosts: [...rec.thirdPartyHosts]   // legacy support
-    };
+    /* --- compute scores ---------------------------------------------- */
+    const inst = instantaneousScore(st);
+    st.emaScore = EMA_ALPHA * inst + (1 - EMA_ALPHA) * st.emaScore;
+    st.minScore = Math.min(st.minScore, inst);
 
-    chrome.tabs.sendMessage(d.tabId, payload, () => {});
-    chrome.action.setBadgeText({ tabId: d.tabId, text: String(payload.score) });
-    chrome.action.setBadgeBackgroundColor({
-      tabId: d.tabId,
-      color: payload.score >= 70 ? 'green'
-           : payload.score >= 40 ? 'orange'
-           : 'red'
-    });
+    /* --- throttle UI pushes ------------------------------------------ */
+    const now   = Date.now();
+    const first = st.lastPush === 0;
+    const due   = now - st.lastPush >= THROTTLE_MS;
+
+    if (first || due) {
+      st.lastPush      = now;
+      st.lastBadgeScore = Math.round(st.emaScore);
+
+      const payload = {
+        type:       'PRIVACY_SCORE',
+        score:      st.lastBadgeScore,           // smoothed + throttled
+        minScore:   st.minScore,
+        requests:   st.requests,
+        trackers:   st.trackers,
+        thirdParty: st.thirdPartyHosts.size,
+        hosts:      topHosts(st),
+        thirdPartyHosts: [...st.thirdPartyHosts] // legacy support
+      };
+
+      chrome.tabs.sendMessage(tabId, payload, () => { /* ignore errors */ });
+
+      chrome.action.setBadgeText({ tabId, text: String(st.lastBadgeScore) });
+      chrome.action.setBadgeBackgroundColor({
+        tabId,
+        color: st.lastBadgeScore >= 70 ? 'green'
+              : st.lastBadgeScore >= 40 ? 'orange'
+              : 'red'
+      });
+    }
   },
   { urls: ['<all_urls>'] }
 );
 
-/* -------- cleanup on tab close / nav --------------------------------- */
-chrome.tabs.onRemoved.addListener(id => delete scores[id]);
-chrome.webNavigation.onCommitted.addListener(({ tabId }) => delete scores[tabId]);
+/* ---------- cleanup on tab events ------------------------------------ */
+chrome.tabs.onRemoved.addListener(id => delete tabs[id]);
+chrome.webNavigation.onCommitted.addListener(({ tabId }) => delete tabs[tabId]);
 
-/* -------- “GET_SCORE” for toolbar popup ------------------------------ */
+/* ---------- message handler (popup & misc) --------------------------- */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_SCORE') {
-    const rec = scores[msg.tabId] ?? {
-      requests: 0,
-      trackers: 0,
-      thirdPartyHosts: new Set(),
-      hostCounts: {}
+    const st = tabs[msg.tabId] ?? {
+      requests: 0, trackers: 0, thirdPartyHosts: new Set(), hostCounts: {},
+      emaScore: 100, minScore: 100, lastBadgeScore: 100
     };
+
     sendResponse({
-      score:      computeScore(rec),
-      requests:   rec.requests,
-      trackers:   rec.trackers,
-      thirdParty: rec.thirdPartyHosts.size,
-      hosts:      topHosts(rec),
-      thirdPartyHosts: [...rec.thirdPartyHosts]
+      score:      st.lastBadgeScore,             // keep popup in sync
+      minScore:   st.minScore,
+      requests:   st.requests,
+      trackers:   st.trackers,
+      thirdParty: st.thirdPartyHosts.size,
+      hosts:      topHosts(st),
+      thirdPartyHosts: [...st.thirdPartyHosts]
     });
-    return true;          // async reply
+    return true;                                // async
   }
+
   if (msg.type === 'OPEN_POPUP') chrome.action.openPopup();
 });

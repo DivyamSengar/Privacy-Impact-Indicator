@@ -1,6 +1,6 @@
 /* -----------------------------------------------------------------------
    Privacy-Impact extension – service-worker
-   v0.4
+   v0.4.2  – proper GET_SCORE response for popup
 ------------------------------------------------------------------------ */
 
 let trackerSet = new Set();
@@ -13,7 +13,7 @@ function getBase(url) {
   catch { return ''; }
 }
 
-function compute(rec) {
+function score(rec) {
   const tp = rec.thirdPartyHosts.size, tr = rec.trackers;
   if (tr > 3 || tp > 10) return 0;
   if (tr)                return Math.max(30 - (tr - 1) * 5, 10);
@@ -29,16 +29,18 @@ function topHosts(rec, n = 12) {
                .map(([host,hits])=>({host,hits,tracker:trackerSet.has(host)}));
 }
 
-const scores = {};
+const scores = {};   // tabId → record
 
 chrome.webRequest.onCompleted.addListener(
   d => {
     if (d.tabId < 0) return;
+
     const rec = scores[d.tabId] ??= {
       requests:0, trackers:0, thirdPartyHosts:new Set(), hostCounts:{}
     };
 
     rec.requests += 1;
+
     const dest = getBase(d.url);
     const page = d.initiator ? getBase(d.initiator) : '';
 
@@ -46,18 +48,23 @@ chrome.webRequest.onCompleted.addListener(
     if (trackerSet.has(dest))  rec.trackers += 1;
     rec.hostCounts[dest] = (rec.hostCounts[dest] || 0) + 1;
 
-    const score = compute(rec);
+    const payload = {
+      type:       'PRIVACY_SCORE',
+      score:      score(rec),
+      requests:   rec.requests,
+      trackers:   rec.trackers,
+      thirdParty: rec.thirdPartyHosts.size,
+      hosts:      topHosts(rec),
+      /* extra field so old popup.js keeps working --------------------- */
+      thirdPartyHosts: [...rec.thirdPartyHosts]
+    };
 
-    chrome.tabs.sendMessage(
-      d.tabId,
-      { type:'PRIVACY_SCORE', score,
-        requests:rec.requests, trackers:rec.trackers,
-        thirdParty:rec.thirdPartyHosts.size, hosts:topHosts(rec) },
-      () => {});
-    chrome.action.setBadgeText({tabId:d.tabId, text:String(score)});
+    chrome.tabs.sendMessage(d.tabId, payload, () => {});
+    chrome.action.setBadgeText({tabId:d.tabId, text:String(payload.score)});
     chrome.action.setBadgeBackgroundColor({
       tabId:d.tabId,
-      color: score>=70?'green':score>=40?'orange':'red'
+      color: payload.score>=70 ? 'green'
+           : payload.score>=40 ? 'orange' : 'red'
     });
   },
   {urls:['<all_urls>']}
@@ -66,13 +73,21 @@ chrome.webRequest.onCompleted.addListener(
 chrome.tabs.onRemoved.addListener(id => delete scores[id]);
 chrome.webNavigation.onCommitted.addListener(({tabId}) => delete scores[tabId]);
 
-chrome.runtime.onMessage.addListener((msg,_,send)=>{
-  if (msg.type==='GET_SCORE'){
-    const rec = scores[msg.tabId] ?? {requests:0, trackers:0,
-                                      thirdPartyHosts:new Set(), hostCounts:{}};
-    send({ score:compute(rec), requests:rec.requests, trackers:rec.trackers,
-           thirdParty:rec.thirdPartyHosts.size, hosts:topHosts(rec) });
-    return true;
+/* ---------------- message handler for popup --------------------------- */
+chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  if (msg.type === 'GET_SCORE') {
+    const rec = scores[msg.tabId] ?? {
+      requests:0, trackers:0, thirdPartyHosts:new Set(), hostCounts:{}
+    };
+    sendResponse({
+      score:      score(rec),
+      requests:   rec.requests,
+      trackers:   rec.trackers,
+      thirdParty: rec.thirdPartyHosts.size,
+      hosts:      topHosts(rec),
+      thirdPartyHosts: [...rec.thirdPartyHosts]   // legacy field
+    });
+    return true;        // keep the channel open for async reply
   }
-  if (msg.type==='OPEN_POPUP') chrome.action.openPopup();
+  if (msg.type === 'OPEN_POPUP') chrome.action.openPopup();
 });

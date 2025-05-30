@@ -1,48 +1,59 @@
 /* -----------------------------------------------------------------------
    Privacy-Impact extension – service-worker
-   v0.4.2  – proper GET_SCORE response for popup
+   v0.5  – smooth exponential scoring
 ------------------------------------------------------------------------ */
 
+const WEIGHTS = { tracker: 0.45, host: 0.15 }; // tweak to taste
+
+/* -------- bootstrap tracker list ------------------------------------- */
 let trackerSet = new Set();
 fetch(chrome.runtime.getURL('trackerList.json'))
   .then(r => r.json())
   .then(list => (trackerSet = new Set(list)));
 
-function getBase(url) {
+/* -------- helpers ----------------------------------------------------- */
+function baseDomain(url) {
   try { return new URL(url).hostname.split('.').slice(-2).join('.'); }
   catch { return ''; }
 }
 
-function score(rec) {
-  const tp = rec.thirdPartyHosts.size, tr = rec.trackers;
-  if (tr > 3 || tp > 10) return 0;
-  if (tr)                return Math.max(30 - (tr - 1) * 5, 10);
-  if (!tp)               return 100;
-  if (tp <= 2)           return 70;
-  if (tp <= 5)           return 50;
-  return 40;
+/* Smooth score: 100 when risk = 0, falls off continuously toward 0. */
+function computeScore(rec) {
+  const wSum  = WEIGHTS.tracker * rec.trackers
+              + WEIGHTS.host    * rec.thirdPartyHosts.size;
+  const risk  = 1 - Math.exp(-wSum);      // ∈ [0,1)
+  return Math.round(100 * (1 - risk));    // 100 .. 0
 }
 
 function topHosts(rec, n = 12) {
   return Object.entries(rec.hostCounts)
-               .sort((a,b)=>b[1]-a[1]).slice(0,n)
-               .map(([host,hits])=>({host,hits,tracker:trackerSet.has(host)}));
+               .sort((a, b) => b[1] - a[1])
+               .slice(0, n)
+               .map(([host, hits]) => ({
+                 host,
+                 hits,
+                 tracker: trackerSet.has(host)
+               }));
 }
 
-const scores = {};   // tabId → record
+/* -------- per-tab bookkeeping ---------------------------------------- */
+const scores = {};                 // tabId → record
 
 chrome.webRequest.onCompleted.addListener(
   d => {
-    if (d.tabId < 0) return;
+    if (d.tabId < 0) return;       // ignore non-tab traffic
 
     const rec = scores[d.tabId] ??= {
-      requests:0, trackers:0, thirdPartyHosts:new Set(), hostCounts:{}
+      requests: 0,
+      trackers: 0,
+      thirdPartyHosts: new Set(),
+      hostCounts: {}
     };
 
     rec.requests += 1;
 
-    const dest = getBase(d.url);
-    const page = d.initiator ? getBase(d.initiator) : '';
+    const dest = baseDomain(d.url);
+    const page = d.initiator ? baseDomain(d.initiator) : '';
 
     if (page && dest !== page) rec.thirdPartyHosts.add(dest);
     if (trackerSet.has(dest))  rec.trackers += 1;
@@ -50,44 +61,48 @@ chrome.webRequest.onCompleted.addListener(
 
     const payload = {
       type:       'PRIVACY_SCORE',
-      score:      score(rec),
+      score:      computeScore(rec),
       requests:   rec.requests,
       trackers:   rec.trackers,
       thirdParty: rec.thirdPartyHosts.size,
       hosts:      topHosts(rec),
-      /* extra field so old popup.js keeps working --------------------- */
-      thirdPartyHosts: [...rec.thirdPartyHosts]
+      thirdPartyHosts: [...rec.thirdPartyHosts]   // legacy support
     };
 
     chrome.tabs.sendMessage(d.tabId, payload, () => {});
-    chrome.action.setBadgeText({tabId:d.tabId, text:String(payload.score)});
+    chrome.action.setBadgeText({ tabId: d.tabId, text: String(payload.score) });
     chrome.action.setBadgeBackgroundColor({
-      tabId:d.tabId,
-      color: payload.score>=70 ? 'green'
-           : payload.score>=40 ? 'orange' : 'red'
+      tabId: d.tabId,
+      color: payload.score >= 70 ? 'green'
+           : payload.score >= 40 ? 'orange'
+           : 'red'
     });
   },
-  {urls:['<all_urls>']}
+  { urls: ['<all_urls>'] }
 );
 
+/* -------- cleanup on tab close / nav --------------------------------- */
 chrome.tabs.onRemoved.addListener(id => delete scores[id]);
-chrome.webNavigation.onCommitted.addListener(({tabId}) => delete scores[tabId]);
+chrome.webNavigation.onCommitted.addListener(({ tabId }) => delete scores[tabId]);
 
-/* ---------------- message handler for popup --------------------------- */
+/* -------- “GET_SCORE” for toolbar popup ------------------------------ */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   if (msg.type === 'GET_SCORE') {
     const rec = scores[msg.tabId] ?? {
-      requests:0, trackers:0, thirdPartyHosts:new Set(), hostCounts:{}
+      requests: 0,
+      trackers: 0,
+      thirdPartyHosts: new Set(),
+      hostCounts: {}
     };
     sendResponse({
-      score:      score(rec),
+      score:      computeScore(rec),
       requests:   rec.requests,
       trackers:   rec.trackers,
       thirdParty: rec.thirdPartyHosts.size,
       hosts:      topHosts(rec),
-      thirdPartyHosts: [...rec.thirdPartyHosts]   // legacy field
+      thirdPartyHosts: [...rec.thirdPartyHosts]
     });
-    return true;        // keep the channel open for async reply
+    return true;          // async reply
   }
   if (msg.type === 'OPEN_POPUP') chrome.action.openPopup();
 });

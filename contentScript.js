@@ -159,3 +159,19 @@ chrome.runtime.onMessage.addListener(msg => {
 window.addEventListener('keydown', e => {
   if (e.altKey && e.key.toLowerCase() === 'p') toggleDrawer();
 });
+(function () {
+  let downTime = null;
+
+  document.addEventListener('mousedown', ev => {
+    if (ev.target.closest('a,button')) {
+      downTime = performance.now();
+    }
+  }, true);
+
+  document.addEventListener('click', ev => {
+    if (!downTime) return;
+    const latency = performance.now() - downTime;
+    downTime = null;
+    chrome.runtime.sendMessage({ type: 'CLICK_LAT', latency });
+  }, true);
+})();

@@ -1,0 +1,18 @@
+# Participant-level dataset for PII user study (N = 15)
+# Columns: Participant ID, Sex (M/F), Technical Familiarity (High/Low), Trackers & Requests (raw counts), NASA-TLX workload (0–100), Usefulness & Intrusiveness ratings (1–7 Likert)
+Participant,Sex,Technical Familiarity,Trackers_Base,Trackers_PII,Requests_Base,Requests_PII,TLX_Base,TLX_PII,Useful,Intrusive
+P01,Female,Low,29,19,245,207,38,40,7.0,2.5
+P02,Male,Low,22,15,188,168,33,33,5.2,5.0
+P03,Male,High,26,17,215,187,31,32,5.4,2.4
+P04,Female,Low,30,20,240,210,37,38,5.8,3.0
+P05,Male,High,24,16,200,174,35,36,6.0,2.6
+P06,Female,High,27,18,225,195,34,35,6.5,2.8
+P07,Male,Low,25,18,205,180,36,37,6.0,2.9
+P08,Female,Low,23,16,198,170,33,34,3.0,1.2
+P09,Male,High,28,18,235,200,39,40,5.6,2.8
+P10,Female,Low,21,14,190,165,32,33,6.2,2.4
+P11,Male,Low,24,17,210,179,35,36,5.5,2.6
+P12,Male,Low,27,19,230,197,37,38,2.5,4.5
+P13,Male,High,26,18,218,185,34,35,6.2,2.6
+P14,Male,High,25,17,208,178,36,37,5.7,2.7
+P15,Male,High,23,16,196,168,33,34,5.5,2.8

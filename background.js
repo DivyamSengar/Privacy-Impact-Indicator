@@ -3,7 +3,7 @@
    v0.6.1  – 5 s throttling · EMA smoothing · min-score tracking ·
              consistent popup/badge numbers
 ------------------------------------------------------------------------ */
-
+const EXT_VERSION = '0.9.0';
 const WEIGHTS   = { tracker: 0.45, host: 0.15 };   // harm per tracker / host
 const EMA_ALPHA = 0.30;                            // 0 → frozen, 1 → no smoothing
 const THROTTLE_MS = 5000;                          // badge / UI update cadence
@@ -35,6 +35,7 @@ const topHosts = (rec, n = 12) =>
 
 /* ---------- per-tab state -------------------------------------------- */
 const tabs = {};   // tabId → state object
+const latencyBuckets = {};
 
 chrome.webRequest.onCompleted.addListener(
   details => {
@@ -108,22 +109,34 @@ chrome.webNavigation.onCommitted.addListener(({ tabId }) => delete tabs[tabId]);
 
 /* ---------- message handler (popup & misc) --------------------------- */
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
+  /* latency updates from content script */
+  if (msg.type === 'CLICK_LAT' && sender.tab) {
+    const tid = sender.tab.id;
+    latencyBuckets[tid] ??= [];
+    latencyBuckets[tid].push(msg.latency);
+    return;                         // no response payload
+  }
+
+  /* popup requests current score */
   if (msg.type === 'GET_SCORE') {
-    const st = tabs[msg.tabId] ?? {
+    const tid  = sender.tab ? sender.tab.id : msg.tabId;
+    const st   = tabs[tid] ?? {
       requests: 0, trackers: 0, thirdPartyHosts: new Set(), hostCounts: {},
       emaScore: 100, minScore: 100, lastBadgeScore: 100
     };
+    const lats = latencyBuckets[tid] || [];
+    const avgLatency = lats.length ? lats.reduce((a,b)=>a+b,0) / lats.length : null;
 
     sendResponse({
-      score:      st.lastBadgeScore,             // keep popup in sync
+      score:      st.lastBadgeScore,
       minScore:   st.minScore,
       requests:   st.requests,
       trackers:   st.trackers,
       thirdParty: st.thirdPartyHosts.size,
       hosts:      topHosts(st),
-      thirdPartyHosts: [...st.thirdPartyHosts]
+      avgLatency
     });
-    return true;                                // async
+    return true;                    // keep channel open for async
   }
 
   if (msg.type === 'OPEN_POPUP') chrome.action.openPopup();

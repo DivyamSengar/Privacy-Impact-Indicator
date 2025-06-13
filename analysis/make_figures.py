@@ -1,8 +1,6 @@
 #!/usr/bin/env python3
 """
-Regenerates tracker_reduction.pdf from study_data.csv.
-If you also want the synthetic score trajectory, leave
-the lower block unchanged or remove it entirely.
+Generates tracker_reduction.pdf from study_data.csv.
 """
 import pandas as pd
 import matplotlib.pyplot as plt

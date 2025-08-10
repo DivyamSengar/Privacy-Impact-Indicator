@@ -1,4 +1,4 @@
-# Privacy Impact Indicator (CSE 291 Final Project)
+# Privacy Impact Indicator
 
 **Author:** Divyam Sengar  |  **Version:** 1.0.0 · June 2025
 
